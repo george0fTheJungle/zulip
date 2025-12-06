@@ -1,3 +1,4 @@
+import logging
 import re
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -7,9 +8,10 @@ from pydantic import Json
 from typing_extensions import override
 
 from zerver.decorator import log_unsupported_webhook_event, webhook_view
-from zerver.lib.exceptions import UnsupportedWebhookEventTypeError
+from zerver.lib.exceptions import JsonableError, UnsupportedWebhookEventTypeError
 from zerver.lib.partial import partial
 from zerver.lib.response import json_success
+from zerver.lib.topic import RESOLVED_TOPIC_PREFIX
 from zerver.lib.typed_endpoint import JsonBodyPayload, typed_endpoint
 from zerver.lib.validator import WildValue, check_bool, check_int, check_none_or, check_string
 from zerver.lib.webhooks.common import (
@@ -17,6 +19,7 @@ from zerver.lib.webhooks.common import (
     check_send_webhook_message,
     get_http_headers_from_filename,
     get_setup_webhook_message,
+    resolve_topic_on_message,
     validate_extract_webhook_http_header,
 )
 from zerver.lib.webhooks.git import (
@@ -175,7 +178,7 @@ def get_issue_body(helper: Helper) -> str:
         number=issue["number"].tame(check_int),
         message=(
             None
-            if action in ("assigned", "unassigned")
+            if action in ("assigned", "unassigned", "closed", "reopened")
             else issue["body"].tame(check_none_or(check_string))
         ),
         title=issue["title"].tame(check_string) if include_title else None,
@@ -1047,6 +1050,7 @@ def api_github_webhook(
         # See IGNORED_EVENTS, for example.
         return json_success(request)
     topic_name = get_topic_based_on_type(payload, event)
+    action = payload.get("action", "").tame(check_string)
 
     body_function = EVENT_FUNCTION_MAPPER[event]
 
@@ -1057,7 +1061,42 @@ def api_github_webhook(
     )
     body = body_function(helper)
 
-    check_send_webhook_message(request, user_profile, topic_name, body, event)
+    # For reopen events, post to the resolved topic first so we can unresolve it afterward.
+    should_auto_resolve = user_specified_topic is None
+    is_reopen_event = should_auto_resolve and (
+        (event == "opened_pull_request" and action == "reopened")
+        or (event == "issues" and action == "reopened")
+    )
+    topic_for_event = RESOLVED_TOPIC_PREFIX + topic_name if is_reopen_event else topic_name
+
+    message_id = check_send_webhook_message(
+        request,
+        user_profile,
+        topic_for_event,
+        body,
+        event,
+        stream=request.GET.get("stream"),
+        user_specified_topic=user_specified_topic,
+    )
+
+    # Auto-resolve/unresolve topics for PRs and issues (unless custom topic specified).
+    # TODO: Add user/organization setting to control auto-resolution behavior (issue #34075)
+    if message_id is not None and should_auto_resolve:
+        if event == "closed_pull_request" or (event == "issues" and action == "closed"):
+            try:
+                resolve_topic_on_message(
+                    user_profile, message_id, RESOLVED_TOPIC_PREFIX + topic_name
+                )
+            except JsonableError as e:  # nocoverage
+                logging.warning("Failed to resolve topic for webhook: %s", e)  # nocoverage
+        elif (event == "opened_pull_request" and action == "reopened") or (
+            event == "issues" and action == "reopened"
+        ):
+            try:
+                resolve_topic_on_message(user_profile, message_id, topic_name)
+            except JsonableError as e:  # nocoverage
+                logging.warning("Failed to unresolve topic for webhook: %s", e)  # nocoverage
+
     return json_success(request)
 
 

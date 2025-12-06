@@ -3,6 +3,7 @@ from unittest.mock import patch
 import orjson
 
 from zerver.lib.test_classes import WebhookTestCase
+from zerver.lib.topic import RESOLVED_TOPIC_PREFIX
 from zerver.lib.webhooks.git import COMMITS_LIMIT
 
 TOPIC_REPO = "public-repo"
@@ -283,7 +284,8 @@ class GitHubWebhookTest(WebhookTestCase):
 
     def test_pull_request_closed_msg(self) -> None:
         expected_message = "baxterthehacker closed without merge [PR #1](https://github.com/baxterthehacker/public-repo/pull/1)."
-        self.check_webhook("pull_request__closed", TOPIC_PR, expected_message)
+        expected_topic = RESOLVED_TOPIC_PREFIX + TOPIC_PR
+        self.check_webhook("pull_request__closed", expected_topic, expected_message)
 
     def test_pull_request_closed_msg_with_custom_topic_in_url(self) -> None:
         self.url = self.build_webhook_url(topic="notifications")
@@ -295,7 +297,8 @@ class GitHubWebhookTest(WebhookTestCase):
         expected_message = (
             "baxterthehacker merged [PR #1](https://github.com/baxterthehacker/public-repo/pull/1)."
         )
-        self.check_webhook("pull_request__merged", TOPIC_PR, expected_message)
+        expected_topic = RESOLVED_TOPIC_PREFIX + TOPIC_PR
+        self.check_webhook("pull_request__merged", expected_topic, expected_message)
 
     def test_pull_request_merged_msg_private_repository_skipped(self) -> None:
         self.url = self.build_webhook_url(ignore_private_repositories="true")
@@ -723,6 +726,24 @@ A temporary team so that I can get some webhook fixtures!
             expected_message=None,
             expect_noop=True,
         )
+
+    def test_pull_request_closed_resolves_topic(self) -> None:
+        expected_message = "baxterthehacker closed without merge [PR #1](https://github.com/baxterthehacker/public-repo/pull/1)."
+        expected_topic_name = RESOLVED_TOPIC_PREFIX + TOPIC_PR
+        self.check_webhook("pull_request__closed", expected_topic_name, expected_message)
+
+    def test_pull_request_reopened_unresolves_topic(self) -> None:
+        expected_message = "baxterthehacker reopened [PR #1](https://github.com/baxterthehacker/public-repo/pull/1)."
+        self.check_webhook("pull_request__reopened", TOPIC_PR, expected_message)
+
+    def test_issues_closed_resolves_topic(self) -> None:
+        expected_message = "baxterthehacker closed [issue #2](https://github.com/baxterthehacker/public-repo/issues/2)."
+        expected_topic_name = RESOLVED_TOPIC_PREFIX + TOPIC_ISSUE
+        self.check_webhook("issues__closed", expected_topic_name, expected_message)
+
+    def test_issues_reopened_unresolves_topic(self) -> None:
+        expected_message = "baxterthehacker reopened [issue #2](https://github.com/baxterthehacker/public-repo/issues/2)."
+        self.check_webhook("issues__reopened", TOPIC_ISSUE, expected_message)
 
 
 class GitHubSponsorsHookTests(WebhookTestCase):
