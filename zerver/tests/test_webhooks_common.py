@@ -12,16 +12,19 @@ from typing_extensions import override
 from zerver.actions.streams import do_rename_stream
 from zerver.decorator import webhook_view
 from zerver.lib.exceptions import InvalidJSONError, JsonableError
+from zerver.lib.message import access_message
 from zerver.lib.request import RequestNotes
 from zerver.lib.send_email import FromAddress
 from zerver.lib.test_classes import WebhookTestCase, ZulipTestCase
 from zerver.lib.test_helpers import HostRequestMock
+from zerver.lib.topic import RESOLVED_TOPIC_PREFIX
 from zerver.lib.webhooks.common import (
     INVALID_JSON_MESSAGE,
     MISSING_EVENT_HEADER_MESSAGE,
     MissingHTTPEventHeaderError,
     check_send_webhook_message,
     get_fixture_http_headers,
+    resolve_topic_on_message,
     standardize_headers,
     validate_extract_webhook_http_header,
     validate_webhook_signature,
@@ -280,3 +283,42 @@ class MissingEventHeaderTestCase(WebhookTestCase):
     @override
     def get_body(self, fixture_name: str) -> str:
         return self.webhook_fixture_data("groove", fixture_name, file_type="json")
+
+
+class ResolveTopicOnMessageTestCase(ZulipTestCase):
+    def test_resolve_topic_on_message_success(self) -> None:
+        user = self.example_user("hamlet")
+        stream = self.make_stream("test_stream")
+        self.subscribe(user, stream.name)
+
+        original_topic = "test topic"
+        message_id = self.send_stream_message(user, stream.name, "Test message", original_topic)
+
+        resolved_topic = RESOLVED_TOPIC_PREFIX + original_topic
+        resolve_topic_on_message(user, message_id, resolved_topic)
+
+        message = access_message(user, message_id, is_modifying_message=False)
+        self.assertEqual(message.topic_name(), resolved_topic)
+
+    def test_unresolve_topic_on_message_success(self) -> None:
+        user = self.example_user("hamlet")
+        stream = self.make_stream("test_stream")
+        self.subscribe(user, stream.name)
+
+        resolved_topic = RESOLVED_TOPIC_PREFIX + "test topic"
+        message_id = self.send_stream_message(user, stream.name, "Test message", resolved_topic)
+
+        unresolved_topic = "test topic"
+        resolve_topic_on_message(user, message_id, unresolved_topic)
+
+        message = access_message(user, message_id, is_modifying_message=False)
+        self.assertEqual(message.topic_name(), unresolved_topic)
+
+    def test_resolve_topic_on_direct_message_error(self) -> None:
+        sender = self.example_user("hamlet")
+        recipient = self.example_user("othello")
+
+        message_id = self.send_personal_message(sender, recipient, "Test DM")
+
+        with self.assertRaisesRegex(JsonableError, "Cannot resolve topics in direct messages"):
+            resolve_topic_on_message(sender, message_id, "any topic")

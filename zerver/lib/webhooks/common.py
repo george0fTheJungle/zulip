@@ -15,6 +15,7 @@ from django.utils.translation import gettext as _
 from pydantic import Json
 from typing_extensions import override
 
+from zerver.actions.message_edit import check_update_message
 from zerver.actions.message_send import (
     check_send_private_message,
     check_send_stream_message,
@@ -27,6 +28,7 @@ from zerver.lib.exceptions import (
     JsonableError,
     StreamDoesNotExistError,
 )
+from zerver.lib.message import access_message
 from zerver.lib.request import RequestNotes
 from zerver.lib.send_email import FromAddress
 from zerver.lib.typed_endpoint import ApiParamConfig, typed_endpoint
@@ -209,6 +211,34 @@ def check_send_webhook_message(
             # non-existent stream, so we don't need to re-raise it since it
             # clutters up webhook-errors.log
             return None
+
+
+def resolve_topic_on_message(
+    user_profile: UserProfile,
+    message_id: int,
+    new_topic_name: str,
+) -> None:
+    """
+    Update the topic for a webhook message to resolve or unresolve it.
+
+    For example, when a GitHub PR is closed, the topic can be marked as
+    resolved by prepending the RESOLVED_TOPIC_PREFIX.
+    """
+    message = access_message(
+        user_profile, message_id, lock_message=False, is_modifying_message=True
+    )
+
+    if not message.is_channel_message:
+        raise JsonableError(_("Cannot resolve topics in direct messages"))
+
+    check_update_message(
+        user_profile=user_profile,
+        message_id=message_id,
+        topic_name=new_topic_name,
+        propagate_mode="change_later",
+        send_notification_to_old_thread=False,
+        send_notification_to_new_thread=False,
+    )
 
 
 def standardize_headers(input_headers: None | dict[str, Any]) -> dict[str, str]:
